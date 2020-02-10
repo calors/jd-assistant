@@ -41,16 +41,16 @@ class Assistant(object):
         use_random_ua = global_config.getboolean('config', 'random_useragent')
         self.user_agent = DEFAULT_USER_AGENT if not use_random_ua else get_random_useragent()
         self.headers = {'User-Agent': self.user_agent}
-        self.eid = global_config.get('config', 'eid').strip()
-        self.fp = global_config.get('config', 'fp').strip()
-        self.track_id = global_config.get('config', 'track_id').strip()
-        self.risk_control = global_config.get('config', 'risk_control').strip()
+        self.eid = global_config.get('config', 'eid')
+        self.fp = global_config.get('config', 'fp')
+        self.track_id = global_config.get('config', 'track_id')
+        self.risk_control = global_config.get('config', 'risk_control')
         if not self.eid or not self.fp or not self.track_id or not self.risk_control:
             raise AsstException('请在 config.ini 中配置 eid, fp, track_id, risk_control 参数，具体请参考 wiki-常见问题')
 
         self.timeout = float(global_config.get('config', 'timeout') or DEFAULT_TIMEOUT)
         self.send_message = global_config.getboolean('messenger', 'enable')
-        self.messenger = Messenger(global_config.get('messenger', 'sckey').strip()) if self.send_message else None
+        self.messenger = Messenger(global_config.get('messenger', 'sckey')) if self.send_message else None
 
         self.item_cat = dict()
         self.item_vender_ids = dict()  # 记录商家id
@@ -461,9 +461,13 @@ class Assistant(object):
             raise AsstException('查询 %s 库存信息异常：%s' % (sku_id, e))
 
         resp_json = parse_json(resp.text)
-        sku_state = resp_json['stock']['skuState']  # 商品是否上架
-        stock_state = resp_json['stock']['StockState']  # 商品库存状态：33 -- 现货  0,34 -- 无货  36 -- 采购中  40 -- 可配货
-        # stock_state_name = resp_json['stock']['StockStateName']
+        stock_info = resp_json.get('stock')
+        if not stock_info:
+            logger.error('查询 %s 库存信息异常, resp: %s', sku_id, resp_json)
+            return False
+
+        sku_state = stock_info.get('skuState')  # 商品是否上架
+        stock_state = stock_info.get('StockState')  # 商品库存状态：33 -- 现货  0,34 -- 无货  36 -- 采购中  40 -- 可配货
         return sku_state == 1 and stock_state in (33, 40)
 
     @check_login
