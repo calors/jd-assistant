@@ -87,8 +87,11 @@ class Assistant(object):
         with open(cookies_file, 'wb') as f:
             pickle.dump(self.sess.cookies, f)
 
-    def _validate_cookies(self):  # True -- cookies is valid, False -- cookies is invalid
-        # user can't access to order list page (would redirect to login page) if his cookies is expired
+    def _validate_cookies(self):
+        """验证cookies是否有效（是否登陆）
+        通过访问用户订单列表页进行判断：若未登录，将会重定向到登陆页面。
+        :return: cookies是否有效 True/False
+        """
         url = 'https://order.jd.com/center/list.action'
         payload = {
             'rid': str(int(time.time() * 1000)),
@@ -452,23 +455,24 @@ class Assistant(object):
             'User-Agent': self.user_agent,
             'Referer': 'https://item.jd.com/{}.html'.format(sku_id),
         }
+
+        resp_text = ''
         try:
-            resp = requests.get(url=url, params=payload, headers=headers, timeout=self.timeout)
+            resp_text = requests.get(url=url, params=payload, headers=headers, timeout=self.timeout).text
+            resp_json = parse_json(resp_text)
+            stock_info = resp_json.get('stock')
+            sku_state = stock_info.get('skuState')  # 商品是否上架
+            stock_state = stock_info.get('StockState')  # 商品库存状态：33 -- 现货  0,34 -- 无货  36 -- 采购中  40 -- 可配货
+            return sku_state == 1 and stock_state in (33, 40)
         except requests.exceptions.Timeout:
             logger.error('查询 %s 库存信息超时(%ss)', sku_id, self.timeout)
             return False
-        except requests.exceptions.RequestException as e:
-            raise AsstException('查询 %s 库存信息异常：%s' % (sku_id, e))
-
-        resp_json = parse_json(resp.text)
-        stock_info = resp_json.get('stock')
-        if not stock_info:
-            logger.error('查询 %s 库存信息异常, resp: %s', sku_id, resp_json)
+        except requests.exceptions.RequestException as request_exception:
+            logger.error('查询 %s 库存信息发生网络请求异常：%s', sku_id, request_exception)
             return False
-
-        sku_state = stock_info.get('skuState')  # 商品是否上架
-        stock_state = stock_info.get('StockState')  # 商品库存状态：33 -- 现货  0,34 -- 无货  36 -- 采购中  40 -- 可配货
-        return sku_state == 1 and stock_state in (33, 40)
+        except Exception as e:
+            logger.error('查询 %s 库存信息发生异常, resp: %s, exception: %s', sku_id, resp_text, e)
+            return False
 
     @check_login
     def get_multi_item_stock(self, sku_ids, area):
@@ -551,24 +555,29 @@ class Assistant(object):
         headers = {
             'User-Agent': self.user_agent
         }
+
+        resp_text = ''
         try:
-            resp = requests.get(url=url, params=payload, headers=headers, timeout=self.timeout)
+            resp_text = requests.get(url=url, params=payload, headers=headers, timeout=self.timeout).text
+            stock = True
+            for sku_id, info in parse_json(resp_text).items():
+                sku_state = info.get('skuState')  # 商品是否上架
+                stock_state = info.get('StockState')  # 商品库存状态
+                if sku_state == 1 and stock_state in (33, 40):
+                    continue
+                else:
+                    stock = False
+                    break
+            return stock
         except requests.exceptions.Timeout:
             logger.error('查询 %s 库存信息超时(%ss)', list(items_dict.keys()), self.timeout)
             return False
-        except requests.exceptions.RequestException as e:
-            raise AsstException('查询 %s 库存信息异常：%s' % (list(items_dict.keys()), e))
-
-        stock = True
-        for sku_id, info in parse_json(resp.text).items():
-            sku_state = info.get('skuState')  # 商品是否上架
-            stock_state = info.get('StockState')  # 商品库存状态
-            if sku_state == 1 and stock_state in (33, 40):
-                continue
-            else:
-                stock = False
-                break
-        return stock
+        except requests.exceptions.RequestException as request_exception:
+            logger.error('查询 %s 库存信息发生网络请求异常：%s', list(items_dict.keys()), request_exception)
+            return False
+        except Exception as e:
+            logger.error('查询 %s 库存信息发生异常, resp: %s, exception: %s', list(items_dict.keys()), resp_text, e)
+            return False
 
     def _if_item_removed(self, sku_id):
         """判断商品是否下架
@@ -823,10 +832,8 @@ class Assistant(object):
 
             logger.info("下单信息：%s", order_detail)
             return order_detail
-        except requests.exceptions.RequestException as e:
-            raise AsstException('订单结算页面获取异常：%s' % e)
         except Exception as e:
-            logger.error('下单页面数据解析异常：%s', e)
+            logger.error('订单结算页面数据解析异常（可以忽略），报错信息：%s', e)
 
     def _save_invoice(self):
         """下单第三方商品时如果未设置发票，将从电子发票切换为普通发票
@@ -1220,6 +1227,7 @@ class Assistant(object):
             'eid': self.eid,
             'fp': self.fp,
             'token': token,
+            'pru': ''
         }
         return data
 
@@ -1266,7 +1274,7 @@ class Assistant(object):
     def exec_seckill(self, sku_id, retry=4, interval=4, num=1):
         """立即抢购
 
-        抢购商品的下单流程与普通商品不同，不支持加入购物车，主要执行流程如下：
+        抢购商品的下单流程与普通商品不同，不支持加入购物车，可能需要提前预约，主要执行流程如下：
         1. 访问商品的抢购链接
         2. 访问抢购订单结算页面（好像可以省略这步，待测试）
         3. 提交抢购（秒杀）订单
@@ -1316,8 +1324,8 @@ class Assistant(object):
 
         预约抢购商品特点：
             1.需要提前点击预约
-            2.大部分此类商品在预约后自动加入购物车，但是无法勾选✓，也无法️进入到结算页面
-            3.到了抢购的时间点后将商品加入购物车，此时才能勾选并下单
+            2.大部分此类商品在预约后自动加入购物车，在购物车中可见但无法勾选✓，也无法进入到结算页面（重要特征）
+            3.到了抢购的时间点后，才能勾选并结算下单
 
         注意：
             1.请在抢购开始前手动清空购物车中此类无法勾选的商品！（因为脚本在执行清空购物车操作时，无法清空不能勾选的商品）
